@@ -47,6 +47,7 @@ import { AndroidRemoteConnection } from '../services/connection'
 import { reconcileTrustedDevices } from '../services/device-directory'
 import { resolveAutomaticPreferredTransports } from '../services/network-route'
 import { serverSession } from '../services/server-session'
+import { sendTaskToRemoteHost } from '../services/remote-task'
 import { resolveAutoConnectDevice } from '../lib/auto-connect'
 import { workspaceStableKey } from '../lib/workspace-key'
 import {
@@ -175,6 +176,7 @@ interface AppState {
   disconnect(): Promise<void>
   openSession(session: RemoteSession): Promise<boolean>
   sendMessage(text: string, images?: PromptImage[]): Promise<boolean>
+  sendTaskToDevice(device: RemoteDevice, text: string, images?: PromptImage[]): Promise<boolean>
   stopSession(): Promise<void>
   respondApproval(itemId: string, outcome: 'allowed-once' | 'rejected'): Promise<void>
   respondQuestion(itemId: string, selected: Record<string, string[]>): Promise<void>
@@ -1190,6 +1192,29 @@ export const useAppStore = create<AppState>((set, get) => ({
         busyAction: undefined,
         error: friendlyError(error),
       }))
+      return false
+    }
+  },
+
+  async sendTaskToDevice(device, input, images = []) {
+    const { config, identity } = get()
+    const text = input.trim()
+    if (config === undefined || identity === undefined || text.length === 0 && images.length === 0) return false
+    set({ busyAction: 'send-remote-task', error: undefined })
+    try {
+      await sendTaskToRemoteHost({
+        baseUrl: config.baseUrl,
+        identity,
+        device,
+        transportPreference: get().transportPreference,
+        text,
+        images,
+      })
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+      set({ busyAction: undefined })
+      return true
+    } catch (error) {
+      set({ busyAction: undefined, error: friendlyError(error) })
       return false
     }
   },

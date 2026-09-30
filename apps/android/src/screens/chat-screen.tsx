@@ -19,12 +19,12 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as ImagePicker from 'expo-image-picker'
-import { ArrowUp, Bot, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Code2, Folder, Layers, Plus, Terminal, Images, RefreshCw, ShieldAlert, Sparkles, User, X } from 'lucide-react-native'
+import { ArrowUp, AtSign, Bot, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Code2, Folder, Layers, Plus, Terminal, Images, RefreshCw, ShieldAlert, Sparkles, User, X } from 'lucide-react-native'
 import Svg, { Path } from 'react-native-svg'
 import { requireSessionTools, useAppStore } from '../state/store'
 import { hasVisibleMessageText } from '../state/event-reducer'
 import { mergeReplyReasoning } from '../state/message-helpers'
-import type { AgentPresetOption, ApprovalActivity, ChatImage, ChatItem, ChatMessage, ModelCatalogModel, ModelProviderGroup, PermissionSelect, PromptImage, QuestionActivity, RemoteSession, ToolActivity, ToolDisplayDetail, WorkspaceView } from '../types'
+import type { AgentPresetOption, ApprovalActivity, ChatImage, ChatItem, ChatMessage, ModelCatalogModel, ModelProviderGroup, PermissionSelect, PromptImage, QuestionActivity, RemoteDevice, RemoteSession, ToolActivity, ToolDisplayDetail, WorkspaceView } from '../types'
 import { Button, IconButton, TopBar } from '../ui/components'
 import { NativeMarkdown } from '../ui/markdown'
 import { radius, spacing, type } from '../ui/theme'
@@ -52,6 +52,7 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
   const modelSelecting = useAppStore(state => state.modelSelecting)
   const permissionSelecting = useAppStore(state => state.permissionSelecting)
   const sendMessage = useAppStore(state => state.sendMessage)
+  const sendTaskToDevice = useAppStore(state => state.sendTaskToDevice)
   const stopSession = useAppStore(state => state.stopSession)
   const reconnect = useAppStore(state => state.reconnect)
   const openSession = useAppStore(state => state.openSession)
@@ -65,6 +66,8 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
   const createSession = useAppStore(state => state.createSession)
   const archiveSession = useAppStore(state => state.archiveSession)
   const workspaces = useAppStore(state => state.workspaces)
+  const devices = useAppStore(state => state.devices)
+  const selectedDevice = useAppStore(state => state.selectedDevice)
   const agentPresetOptions = useAppStore(state => state.agentPresetOptions)
   const agentPresetLoading = useAppStore(state => state.agentPresetLoading)
   const agentPresetSelecting = useAppStore(state => state.agentPresetSelecting)
@@ -77,6 +80,8 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
   const [permissionPickerOpen, setPermissionPickerOpen] = useState(false)
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false)
   const [toolPickerOpen, setToolPickerOpen] = useState(false)
+  const [remoteDevicePickerOpen, setRemoteDevicePickerOpen] = useState(false)
+  const [remoteDevice, setRemoteDevice] = useState<RemoteDevice>()
   const [toolsMode, setToolsMode] = useState<'files' | 'terminal'>()
   const [permissionOptions, setPermissionOptions] = useState<PermissionSelect['options']>()
   const [permissionError, setPermissionError] = useState<string>()
@@ -198,15 +203,36 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
   if (session === undefined) return null
 
   const submit = async () => {
-    const text = draft.trim()
+    const originalDraft = draft
+    const text = remoteDevice === undefined
+      ? draft.trim()
+      : draft.trim().replace(new RegExp(`^@${escapeRegExp(remoteDevice.name)}\\s*`), '').trim()
     if (text.length === 0 && images.length === 0) return
     const submittedImages = images
     setDraft('')
     setImages([])
-    if (!await sendMessage(text, submittedImages)) {
-      setDraft(text)
+    const sent = remoteDevice === undefined
+      ? await sendMessage(text, submittedImages)
+      : await sendTaskToDevice(remoteDevice, text, submittedImages)
+    if (!sent) {
+      setDraft(originalDraft)
       setImages(submittedImages)
+    } else {
+      if (remoteDevice !== undefined) Alert.alert(zhCN.chat.remoteTaskSentTitle, zhCN.chat.remoteTaskSentBody(remoteDevice.name))
+      setRemoteDevice(undefined)
     }
+  }
+
+  const onDraftChange = (value: string) => {
+    setDraft(value)
+    if (remoteDevice === undefined && /(?:^|\s)@[\w-]*$/.test(value)) setRemoteDevicePickerOpen(true)
+  }
+
+  const chooseRemoteDevice = (device: RemoteDevice) => {
+    setRemoteDevice(device)
+    setRemoteDevicePickerOpen(false)
+    const mention = `@${device.name} `
+    setDraft(current => /(?:^|\s)@[\w-]*$/.test(current) ? current.replace(/@[\w-]*$/, mention) : `${mention}${current}`)
   }
 
   const pickImages = async () => {
@@ -509,13 +535,22 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
             {!stopping && <ReplyStatusDots />}
           </View>
         )}
+        {remoteDevice !== undefined && (
+          <View style={styles.remoteTaskTarget}>
+            <AtSign size={14} color={colors.primary} />
+            <Text style={styles.remoteTaskTargetText} numberOfLines={1}>{remoteDevice.name}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel={zhCN.chat.clearRemoteTarget} onPress={() => { setRemoteDevice(undefined); setDraft(current => current.replace(new RegExp(`^@${escapeRegExp(remoteDevice.name)}\\s*`), '')) }} hitSlop={8}>
+              <X size={15} color={colors.muted} />
+            </Pressable>
+          </View>
+        )}
         <View style={styles.composerCard}>
           <TextInput
             accessibilityLabel={session.backend === 'codex' ? zhCN.chat.codexMessageLabel : zhCN.chat.messageLabel}
             style={styles.composerInput}
             value={draft}
-            onChangeText={setDraft}
-            placeholder={session.backend === 'codex' ? zhCN.chat.codexPlaceholder : zhCN.chat.placeholder}
+            onChangeText={onDraftChange}
+            placeholder={remoteDevice === undefined ? (session.backend === 'codex' ? zhCN.chat.codexPlaceholder : zhCN.chat.placeholder) : zhCN.chat.remoteTaskPlaceholder(remoteDevice.name)}
             placeholderTextColor={colors.muted}
             multiline
             maxLength={12_000}
@@ -533,6 +568,17 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
               style={({ pressed }) => [styles.plusButton, pressed && styles.plusPressed, (!connected || permissionSelecting) && styles.plusDisabled]}
             >
               <Plus size={20} color={connected ? colors.ink : colors.disabled} />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={zhCN.chat.mentionDevice}
+              accessibilityState={{ disabled: !connected || permissionSelecting || busy === 'send-remote-task' }}
+              disabled={!connected || permissionSelecting || busy === 'send-remote-task'}
+              onPress={() => setRemoteDevicePickerOpen(true)}
+              hitSlop={8}
+              style={({ pressed }) => [styles.mentionButton, pressed && styles.plusPressed, (!connected || permissionSelecting || busy === 'send-remote-task') && styles.plusDisabled]}
+            >
+              <AtSign size={19} color={connected ? colors.ink : colors.disabled} />
             </Pressable>
             <View style={styles.composerSpacer} />
             {sessionModels !== undefined && (
@@ -558,12 +604,12 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
               : <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={zhCN.chat.send}
-                  accessibilityState={{ disabled: !connected || permissionSelecting || (draft.trim().length === 0 && images.length === 0) }}
-                  disabled={!connected || permissionSelecting || (draft.trim().length === 0 && images.length === 0)}
+                  accessibilityState={{ disabled: !connected || permissionSelecting || busy === 'send-remote-task' || (draft.trim().length === 0 && images.length === 0) }}
+                  disabled={!connected || permissionSelecting || busy === 'send-remote-task' || (draft.trim().length === 0 && images.length === 0)}
                   onPress={() => void submit()}
-                  style={({ pressed }) => [styles.sendButton, pressed && styles.sendPressed, (!connected || permissionSelecting || (draft.trim().length === 0 && images.length === 0)) && styles.sendDisabled]}
+                  style={({ pressed }) => [styles.sendButton, pressed && styles.sendPressed, (!connected || permissionSelecting || busy === 'send-remote-task' || (draft.trim().length === 0 && images.length === 0)) && styles.sendDisabled]}
                 >
-                  <ArrowUp size={20} color={colors.white} />
+                  {busy === 'send-remote-task' ? <ActivityIndicator size="small" color={colors.white} /> : <ArrowUp size={20} color={colors.white} />}
                 </Pressable>}
           </View>
         </View>
@@ -676,7 +722,49 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
       <ModePicker visible={modePickerOpen} options={agentPresetOptions} current={currentAgentPresetId} loading={agentPresetLoading} selecting={agentPresetSelecting} onClose={() => setModePickerOpen(false)} onPick={pickMode} />
       <WorkspacePicker visible={workspacePickerOpen} workspaces={workspaces} currentSessionId={session.sessionId} sessionBackend={session.backend} busy={busy} onClose={() => setWorkspacePickerOpen(false)} onPick={pickWorkspace} onManage={onOpenWorkspaces} />
       <ToolAccessPicker visible={toolPickerOpen} onClose={() => setToolPickerOpen(false)} onPick={pickToolMode} />
+      <RemoteDevicePicker
+        visible={remoteDevicePickerOpen}
+        devices={devices}
+        currentDeviceId={selectedDevice?.deviceId}
+        busy={busy === 'send-remote-task'}
+        onClose={() => setRemoteDevicePickerOpen(false)}
+        onPick={chooseRemoteDevice}
+      />
     </KeyboardInset>
+  )
+}
+
+function RemoteDevicePicker({ visible, devices, currentDeviceId, busy, onClose, onPick }: {
+  visible: boolean
+  devices: RemoteDevice[]
+  currentDeviceId?: string
+  busy: boolean
+  onClose: () => void
+  onPick: (device: RemoteDevice) => void
+}) {
+  const { colors } = useTheme()
+  const styles = useThemedStyles(createStyles)
+  const options = devices.filter(device => device.deviceId !== currentDeviceId && device.role !== 'client')
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <ModalSurface onClose={onClose}>
+        <View style={styles.modalHeader}><Text style={styles.modalTitle}>{zhCN.chat.mentionDevice}</Text><IconButton label={zhCN.common.close} icon={X} onPress={onClose} /></View>
+        <Text style={styles.pickerHint}>{zhCN.chat.mentionDeviceHint}</Text>
+        <ScrollView style={{ maxHeight: usePickerListMaxHeight() }} contentContainerStyle={styles.modalListContent} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+          {options.length === 0
+            ? <Text style={styles.modelFailures}>{zhCN.chat.noRemoteDevices}</Text>
+            : options.map(device => (
+              <Pressable key={device.deviceId} accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy} onPress={() => onPick(device)} style={[styles.permissionOption, busy && styles.plusMenuOptionDisabled]}>
+                <View style={styles.permissionOptionCopy}>
+                  <Text style={styles.permissionOptionName}>{device.name}</Text>
+                  <Text style={styles.permissionOptionDescription}>{device.online ? zhCN.status.online : zhCN.status.offline}</Text>
+                </View>
+                <View style={[styles.remoteDeviceDot, { backgroundColor: device.online ? colors.success : colors.muted }]} />
+              </Pressable>
+            ))}
+        </ScrollView>
+      </ModalSurface>
+    </Modal>
   )
 }
 
@@ -1598,6 +1686,7 @@ function createStyles(colors: ThemeColors) {
   composerControls: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: 2 },
   composerSpacer: { flex: 1 },
   plusButton: { width: 36, height: 36, borderRadius: radius.pill, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
+  mentionButton: { width: 32, height: 36, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center' },
   plusPressed: { opacity: 0.7 },
   plusDisabled: { opacity: 0.52 },
   plusMenuOption: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.md, borderRadius: radius.md, backgroundColor: colors.surface, marginBottom: spacing.xs },
@@ -1620,5 +1709,12 @@ function createStyles(colors: ThemeColors) {
   stopPressed: { opacity: 0.78 },
   sendDisabled: { backgroundColor: colors.disabled },
   composerHint: { ...type.caption, color: colors.muted, textAlign: 'center', marginTop: 5 },
+  remoteTaskTarget: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, marginBottom: spacing.xxs, borderRadius: radius.md, backgroundColor: colors.primarySoft },
+  remoteTaskTargetText: { ...type.smallStrong, color: colors.primary, flex: 1 },
+  remoteDeviceDot: { width: 8, height: 8, borderRadius: radius.pill },
   })
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
