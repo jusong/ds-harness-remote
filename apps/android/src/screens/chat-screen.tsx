@@ -104,6 +104,10 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
     return () => controller.abort()
   }, [session?.sessionId, session?.backend, inlinePermissionOptions, connection.phase, permissionPickerOpen, permissionRevision])
   useEffect(() => { setToolsMode(undefined) }, [session?.sessionId, connection.phase])
+  useEffect(() => {
+    setRemoteDevice(undefined)
+    setRemoteDevicePickerOpen(false)
+  }, [session?.sessionId])
   // The mode (agent-preset) roster is deployment-level; fetch it once per connection.
   useEffect(() => {
     if (connection.phase !== 'connected' || session?.backend === 'codex') return
@@ -201,6 +205,7 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
   ), [busy, compactChat, respondApproval, respondQuestion])
 
   if (session === undefined) return null
+  const remoteTaskSupported = session.backend !== 'codex'
 
   const submit = async () => {
     const originalDraft = draft
@@ -225,7 +230,7 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
 
   const onDraftChange = (value: string) => {
     setDraft(value)
-    if (remoteDevice === undefined && /(?:^|\s)@[\w-]*$/.test(value)) setRemoteDevicePickerOpen(true)
+    if (remoteTaskSupported && remoteDevice === undefined && /(?:^|\s)@[\w-]*$/.test(value)) setRemoteDevicePickerOpen(true)
   }
 
   const chooseRemoteDevice = (device: RemoteDevice) => {
@@ -572,11 +577,11 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={zhCN.chat.mentionDevice}
-              accessibilityState={{ disabled: !connected || permissionSelecting || busy === 'send-remote-task' }}
-              disabled={!connected || permissionSelecting || busy === 'send-remote-task'}
+              accessibilityState={{ disabled: !remoteTaskSupported || !connected || permissionSelecting || busy === 'send-remote-task' }}
+              disabled={!remoteTaskSupported || !connected || permissionSelecting || busy === 'send-remote-task'}
               onPress={() => setRemoteDevicePickerOpen(true)}
               hitSlop={8}
-              style={({ pressed }) => [styles.mentionButton, pressed && styles.plusPressed, (!connected || permissionSelecting || busy === 'send-remote-task') && styles.plusDisabled]}
+              style={({ pressed }) => [styles.mentionButton, pressed && styles.plusPressed, (!remoteTaskSupported || !connected || permissionSelecting || busy === 'send-remote-task') && styles.plusDisabled]}
             >
               <AtSign size={19} color={connected ? colors.ink : colors.disabled} />
             </Pressable>
@@ -723,7 +728,7 @@ export function ChatScreen({ onBack, onOpenWorkspaces }: { onBack: () => void; o
       <WorkspacePicker visible={workspacePickerOpen} workspaces={workspaces} currentSessionId={session.sessionId} sessionBackend={session.backend} busy={busy} onClose={() => setWorkspacePickerOpen(false)} onPick={pickWorkspace} onManage={onOpenWorkspaces} />
       <ToolAccessPicker visible={toolPickerOpen} onClose={() => setToolPickerOpen(false)} onPick={pickToolMode} />
       <RemoteDevicePicker
-        visible={remoteDevicePickerOpen}
+        visible={remoteTaskSupported && remoteDevicePickerOpen}
         devices={devices}
         currentDeviceId={selectedDevice?.deviceId}
         busy={busy === 'send-remote-task'}
