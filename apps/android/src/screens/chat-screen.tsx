@@ -25,7 +25,9 @@ import { ArrowUp, Bot, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, Ci
 import Svg, { Path } from 'react-native-svg'
 import { OfficialMenuIcons } from '../ui/official-menu-icons'
 import { requireSessionTools, useAppStore } from '../state/store'
-import { hasVisibleMessageText } from '../state/event-reducer'
+// The composer's stop-only mode is derived from this same predicate the store
+// uses to settle stale items, so the two cannot drift apart.
+import { hasVisibleMessageText, isActiveChatItem } from '../state/event-reducer'
 import { chatSections, mergeReplyReasoning, type ChatSection } from '../state/message-helpers'
 import type { AgentPresetOption, ApprovalActivity, ChatImage, ChatItem, ChatMessage, ModelCatalogModel, ModelProviderGroup, PermissionSelect, PromptImage, QuestionActivity, RemoteSession, ToolActivity, ToolDisplayDetail, WorkspaceView } from '../types'
 import { Button, IconButton, TopBar } from '../ui/components'
@@ -2215,13 +2217,6 @@ function ReplyStatusDots() {
       ))}
     </View>
   )
-}
-
-function isActiveChatItem(item: ChatItem): boolean {
-  if (item.kind === 'message') return item.streaming === true
-  if (item.kind === 'tool') return item.state === 'running'
-  if (item.kind === 'approval' || item.kind === 'question') return item.outcome === undefined
-  return false
 }
 
 function createStyles(colors: ThemeColors) {

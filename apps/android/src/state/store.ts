@@ -100,7 +100,7 @@ import type {
   WorkspaceList,
   WorkspaceView,
 } from '../types'
-import { foldHistory, applyMuxFrameToMessages, sessionRunningForMuxFrame } from './event-reducer'
+import { foldHistory, applyMuxFrameToMessages, sessionRunningForMuxFrame, settleChatItems } from './event-reducer'
 import { findApproval, findQuestion, mapApprovalOutcome, mapQuestionAnswered, mergeHistoryAndLive, oldestSeq, prependHistory } from './message-helpers'
 
 function applyFeedback(items: ChatItem[], ratings?: Map<string, ChatMessage['feedback']>): ChatItem[] {
@@ -226,6 +226,34 @@ export const requireSessionTools = () => connection.requireSessionTools()
 let activeCodexStream: CodexStream | undefined
 let activeCodexTimeline: CodexTimelineState | undefined
 const codexModelSelections = new Map<string, ModelSelection>()
+
+/**
+ * Upper bound on how long the local "sending" state may outlive the
+ * `session.prompt` acknowledgement it is waiting on.
+ *
+ * The sending state is intentionally kept until a Host frame proves the turn
+ * began, so the quick actions stay disabled instead of flickering. That release
+ * depends on a frame arriving, though, and the frames that would release it can
+ * be lost with a transport drop, a backgrounded app, or a prompt the Host
+ * rejects silently. A stuck value is not cosmetic: it drives the composer into
+ * stop-only mode, which disables sending for the whole session.
+ */
+const PROMPT_ACK_TIMEOUT_MS = 20_000
+let promptAckTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearPromptAckTimer(): void {
+  if (promptAckTimer === undefined) return
+  clearTimeout(promptAckTimer)
+  promptAckTimer = undefined
+}
+
+function armPromptAckTimer(): void {
+  clearPromptAckTimer()
+  promptAckTimer = setTimeout(() => {
+    promptAckTimer = undefined
+    useAppStore.setState(state => state.busyAction === 'send-message' ? { busyAction: undefined } : {})
+  }, PROMPT_ACK_TIMEOUT_MS)
+}
 
 export const useAppStore = create<AppState>((set, get) => ({
   bootPhase: 'loading',
@@ -601,6 +629,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   async disconnect() {
     await closeActiveCodexStream(false)
     await connection.close()
+    clearPromptAckTimer()
     codexModelSelections.clear()
     set({
       connection: disconnected,
@@ -684,19 +713,36 @@ export const useAppStore = create<AppState>((set, get) => ({
       ])
       const ratings = feedback === undefined ? undefined : new Map(feedback.map(row => [row.messageId, row.rating]))
       const items = foldHistory(history.events, session.sessionId, true)
-      set(state => ({
-        selectedSession: session,
-        historyLoadingOlder: false,
-        feedbackBySession: ratings === undefined ? state.feedbackBySession : { ...state.feedbackBySession, [session.sessionId]: ratings },
-        messages: {
-          ...state.messages,
-          [session.sessionId]: applyFeedback(mergeHistoryAndLive(items, state.messages[session.sessionId] ?? []), ratings),
-        },
-        historyHasMore: history.hasMore,
-        oldestLoadedSeq: oldestSeq(history.events),
-        busyAction: undefined,
-      }))
-      void refreshSessionModels(session.sessionId)
+      // Callers can hand over a session captured before the latest
+      // `session.list` (the Android foreground path does exactly that). Resolve
+      // it again so a turn that ended while the app was away is not still
+      // reported as running.
+      const current = get().sessions.find(item => item.sessionId === session.sessionId) ?? session
+      set(state => {
+        const merged = mergeHistoryAndLive(items, state.messages[current.sessionId] ?? [])
+        return {
+          selectedSession: current,
+          historyLoadingOlder: false,
+          feedbackBySession: ratings === undefined ? state.feedbackBySession : { ...state.feedbackBySession, [current.sessionId]: ratings },
+          messages: {
+            ...state.messages,
+            // A freshly folded history page plus the Host's own `running` flag
+            // are the authoritative view of this session. Anything still marked
+            // active while the Host says the turn is over is a frame we lost,
+            // and leaving it active locks the composer for good. The strict
+            // `=== true` check is deliberate: if a carrier omits the flag we
+            // settle, because a recoverable send button beats a wedged screen.
+            [current.sessionId]: applyFeedback(
+              current.running === true ? merged : settleChatItems(merged),
+              ratings,
+            ),
+          },
+          historyHasMore: history.hasMore,
+          oldestLoadedSeq: oldestSeq(history.events),
+          busyAction: undefined,
+        }
+      })
+      void refreshSessionModels(current.sessionId)
     }
     try {
       await load()
@@ -1237,7 +1283,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         // Keep the sending state until the Host event stream confirms that
         // execution has actually started. `session.prompt` only acknowledges
         // receipt, so clearing busyAction here briefly re-enables the quick
-        // actions before the first assistant/tool event arrives.
+        // actions before the first assistant/tool event arrives. The watchdog
+        // guarantees that state still clears when that frame never shows up.
+        armPromptAckTimer()
         await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
         return true
       }
@@ -1245,6 +1293,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
       return true
     } catch (error) {
+      clearPromptAckTimer()
       set(state => ({
         messages: {
           ...state.messages,
@@ -1283,7 +1332,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (error) {
       set({ error: friendlyError(error) })
     } finally {
-      set({ busyAction: undefined })
+      // Stop is the user's way out of a busy-looking conversation, so it has to
+      // release the UI even when the Host reports nothing left to cancel. The
+      // frames that would normally settle these items may have been lost, and
+      // `sessionCancel` can also fail precisely because the turn already ended.
+      set(state => ({
+        busyAction: undefined,
+        messages: {
+          ...state.messages,
+          [session.sessionId]: settleChatItems(state.messages[session.sessionId] ?? []),
+        },
+        sessions: state.sessions.map(item => item.sessionId === session.sessionId
+          ? { ...item, running: false }
+          : item),
+        selectedSession: state.selectedSession?.sessionId === session.sessionId
+          ? { ...state.selectedSession, running: false }
+          : state.selectedSession,
+      }))
+      clearPromptAckTimer()
     }
   },
 
@@ -1439,6 +1505,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setOffline() {
+    clearPromptAckTimer()
     if (get().connection.phase !== 'disconnected') {
       set({
         connection: { phase: 'offline', stats: { mode: 'Disconnected', connected: false }, error: zhCN.runtime.networkUnavailable },
@@ -1473,6 +1540,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...(releasePrompt ? { busyAction: undefined } : {}),
       }
     })
+    if (useAppStore.getState().busyAction !== 'send-message') clearPromptAckTimer()
   },
 
   handleCodexFrame(frame) {

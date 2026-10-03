@@ -1,3 +1,4 @@
+import { isActiveChatItem, settleChatItem } from './event-reducer'
 import type { ChatItem, HistoryEntry } from '../types'
 
 export function findApproval(messages: Record<string, ChatItem[]>, itemId: string) {
@@ -46,9 +47,35 @@ export function mergeHistoryAndLive(history: ChatItem[], live: ChatItem[]): Chat
   const liveById = new Map(live.map(item => [item.id, item]))
   const historyIds = new Set(history.map(item => item.id))
   return [
-    ...history.map(item => liveById.get(item.id) ?? item),
+    ...history.map(item => mergeSettledWithLive(item, liveById.get(item.id))),
     ...live.filter(item => !historyIds.has(item.id)),
   ]
+}
+
+/**
+ * Keep the live copy for content, but let history win on settle state.
+ *
+ * The live copy is whichever snapshot the client happened to build while frames
+ * were streaming in. When the turn finishes on the Host, the terminal frame
+ * (`tool/result`, the final `assistant/message`) can be lost with a transport
+ * drop, leaving the live copy stuck at "running". Re-opening the session then
+ * folds history that already shows the settled item, and a plain live-wins
+ * merge would resurrect that stale "in progress" state and lock the composer
+ * into stop-only mode for good.
+ */
+function mergeSettledWithLive(historyItem: ChatItem, liveItem: ChatItem | undefined): ChatItem {
+  if (liveItem === undefined) return historyItem
+  if (!isActiveChatItem(liveItem) || isActiveChatItem(historyItem)) return liveItem
+  if (historyItem.kind === 'tool' && liveItem.kind === 'tool') {
+    // Adopt the authoritative outcome, but keep the live call detail so the
+    // row does not lose content the folded window may not carry.
+    return {
+      ...liveItem,
+      state: historyItem.state,
+      ...(historyItem.resultDetail === undefined ? {} : { resultDetail: historyItem.resultDetail }),
+    }
+  }
+  return settleChatItem(liveItem)
 }
 
 export type ChatSection =

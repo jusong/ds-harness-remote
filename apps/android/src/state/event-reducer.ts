@@ -65,6 +65,51 @@ export function applyMuxFrameToMessages(
   }
 }
 
+/**
+ * True while an item still represents unfinished work: a streaming assistant
+ * message, a running tool, or a decision the Host is still waiting on.
+ *
+ * This is the single source of truth for "is this conversation busy". The chat
+ * screen derives its stop-only composer from it, so every path that wants to
+ * unlock the composer must settle the items it would otherwise wait on.
+ */
+export function isActiveChatItem(item: ChatItem): boolean {
+  if (item.kind === 'message') return item.streaming === true
+  if (item.kind === 'tool') return item.state === 'running'
+  if (item.kind === 'approval' || item.kind === 'question') return item.outcome === undefined
+  return false
+}
+
+/** Force one unfinished item into a settled state, keeping its displayed content. */
+export function settleChatItem(item: ChatItem): ChatItem {
+  if (!isActiveChatItem(item)) return item
+  if (item.kind === 'message') {
+    // Settled assistant messages folded from history never carry these flags,
+    // so drop them instead of inventing a `false` the UI has to special-case.
+    const settled: ChatMessage = { ...item }
+    delete settled.streaming
+    delete settled.streamingPhase
+    return settled
+  }
+  if (item.kind === 'tool') {
+    // A tool whose `tool/result` frame was lost has no result to show. Mark it
+    // finished so the row renders like any other completed call.
+    return { ...item, state: 'finished' }
+  }
+  if (item.kind === 'approval') {
+    // The decision left the Host, or the Host dropped it. Either way this card
+    // can no longer be answered, and an answerable-looking card would keep the
+    // composer locked behind a button that always fails.
+    return { ...item, outcome: 'unavailable' }
+  }
+  return { ...item, outcome: 'cancelled' }
+}
+
+/** Settle every unfinished item in one list. */
+export function settleChatItems(items: ChatItem[]): ChatItem[] {
+  return items.map(settleChatItem)
+}
+
 function applyNativeEvent(
   current: ChatItem[], event: NativeSessionEvent, sessionId: string, view?: HistoryEntry['view'], captureContext = false,
 ): ChatItem[] {
