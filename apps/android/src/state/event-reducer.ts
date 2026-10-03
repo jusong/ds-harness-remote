@@ -121,8 +121,19 @@ function applyNativeEvent(
       }]
     : reduceNativeEvent(current, event, sessionId, view)
   const time = typeof event.time === 'number' && Number.isFinite(event.time) && event.time > 0 ? event.time : undefined
+  // The reducer returns `current` untouched when the event does not apply. Handing
+  // that same array back lets the store selector keep its reference, so frames
+  // that change nothing cost a single comparison instead of a full rebuild.
+  if (next === current) return current
   const usage = nativeUsage(event.data)
-  return next.map(item => current.includes(item) ? item : {
+  // `reduceNativeEvent` preserves the identity of every item it does not touch,
+  // so membership in the previous list is exactly the "needs this event's
+  // metadata" test. This must be a Set: an `includes` scan here made every
+  // streamed frame O(n^2) in the conversation length, which saturated the JS
+  // thread and froze the entire screen (taps and back included) on long
+  // sessions rather than merely lagging behind.
+  const previous = new Set(current)
+  return next.map(item => previous.has(item) ? item : {
     ...item,
     ...(Number.isSafeInteger(event.seq) && event.seq >= 0 ? { nativeSeq: event.seq } : {}),
     ...(time === undefined ? {} : { createdAt: time, nativeTime: time }),
@@ -131,10 +142,25 @@ function applyNativeEvent(
   })
 }
 
+/** Chars that never render; a string made only of them is not visible content. */
+const ONLY_INVISIBLE_TEXT = /^[\s\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]*$/u
+
 function nativeUsage(data: UnknownRecord): ChatMessage['usage'] {
   const records = Array.isArray(data.stream) ? data.stream : []
-  const last = [...records].reverse().find(row => isRecord(row) && row.type === 'chunk' && isRecord(row.chunk) && row.chunk.type === 'usage')
-  const value = data.usage ?? (isRecord(last) && isRecord(last.chunk) ? last.chunk.usage : undefined)
+  // Most events carry neither form. Bail out before touching the stream array.
+  if (data.usage === undefined && records.length === 0) return undefined
+  // Walk backwards for the last usage chunk instead of copying and reversing
+  // the whole array; this runs on every streamed event.
+  let value = data.usage
+  if (value === undefined) {
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const row = records[index]
+      if (isRecord(row) && row.type === 'chunk' && isRecord(row.chunk) && row.chunk.type === 'usage') {
+        value = row.chunk.usage
+        break
+      }
+    }
+  }
   if (!isRecord(value)) return undefined
   const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0
   if (!count(value.inputTokens) || !count(value.outputTokens)) return undefined
@@ -276,7 +302,11 @@ function applyAssistantChunk(
 
 /** True when text contains something that can produce visible chat content. */
 export function hasVisibleMessageText(text: string): boolean {
-  return text.replace(/[\s\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu, '').length > 0
+  // Equivalent to "strip invisible chars and check the remainder is non-empty",
+  // but without building that stripped copy. This runs over the full text of
+  // every item on every streamed frame, so allocating a second copy of the
+  // whole conversation each time is what made long sessions crawl.
+  return !ONLY_INVISIBLE_TEXT.test(text)
 }
 
 function applyToolCall(

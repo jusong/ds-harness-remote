@@ -210,6 +210,7 @@ interface AppState {
   signOut(): Promise<void>
   setOffline(): void
   clearError(): void
+  handleMuxFrames(frames: MuxStreamFrame[]): void
   handleMuxFrame(frame: MuxStreamFrame): void
   handleCodexFrame(frame: { method: string; params: unknown }): void
 }
@@ -253,6 +254,72 @@ function armPromptAckTimer(): void {
     promptAckTimer = undefined
     useAppStore.setState(state => state.busyAction === 'send-message' ? { busyAction: undefined } : {})
   }, PROMPT_ACK_TIMEOUT_MS)
+}
+
+/** Fold one mux frame onto the store state. Pure, so a batch can share one update. */
+function reduceMuxFrameOntoState(state: AppState, frame: MuxStreamFrame): AppState {
+  const sessionId = frame.payload.sessionId
+  const running = sessionRunningForMuxFrame(frame)
+  const releasePrompt = state.busyAction === 'send-message'
+    && sessionId !== undefined
+    && state.selectedSession?.sessionId === sessionId
+    && (isHarnessPromptStarted(frame) || running !== undefined)
+  const updateRunning = (session: RemoteSession): RemoteSession => (
+    sessionId !== undefined && running !== undefined && session.sessionId === sessionId
+      ? { ...session, running }
+      : session
+  )
+  return {
+    ...state,
+    messages: applyMuxFrameToMessages(state.messages, frame),
+    ...(sessionId === undefined || running === undefined ? {} : {
+      sessions: state.sessions.map(updateRunning),
+      selectedSession: state.selectedSession === undefined ? undefined : updateRunning(state.selectedSession),
+    }),
+    ...(releasePrompt ? { busyAction: undefined } : {}),
+  }
+}
+
+/**
+ * Frames buffered until the next UI frame.
+ *
+ * The Host streams far faster than the screen refreshes, and every applied frame
+ * re-renders the conversation. Applying them one by one therefore queues React
+ * work faster than it can drain: the JS thread saturates, touch events stop
+ * being dispatched (so even the back button dies), while native-driven
+ * animations keep running because they never touch the JS thread. Coalescing
+ * bounds the render rate to the display instead of the Host.
+ */
+const pendingMuxFrames: MuxStreamFrame[] = []
+let muxFlushScheduled = false
+
+const requestFrame: (callback: () => void) => void = typeof requestAnimationFrame === 'function'
+  ? callback => { requestAnimationFrame(() => { callback() }) }
+  : callback => { setTimeout(callback, 16) }
+
+function flushPendingMuxFrames(): void {
+  muxFlushScheduled = false
+  if (pendingMuxFrames.length === 0) return
+  // Take the buffer first: a frame arriving during the flush schedules the next
+  // one, so ordering is preserved and no frame is dropped.
+  const frames = pendingMuxFrames.splice(0, pendingMuxFrames.length)
+  useAppStore.getState().handleMuxFrames(frames)
+}
+
+/** Apply everything buffered right now, before an action overrides the state. */
+function flushMuxFramesNow(): void {
+  if (muxFlushScheduled) {
+    muxFlushScheduled = false
+    // A scheduled flush is a no-op once the buffer is drained.
+  }
+  flushPendingMuxFrames()
+}
+
+function enqueueMuxFrame(frame: MuxStreamFrame): void {
+  pendingMuxFrames.push(frame)
+  if (muxFlushScheduled) return
+  muxFlushScheduled = true
+  requestFrame(flushPendingMuxFrames)
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -523,7 +590,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         identity,
         device,
         credentials.accessToken,
-        frame => get().handleMuxFrame(frame),
+        frame => enqueueMuxFrame(frame),
         {
           fetchIceServers: async connectionId => api.turnCredentials(connectionId),
           preferredTransports: [...preferredTransports],
@@ -627,6 +694,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   async disconnect() {
+    flushMuxFramesNow()
     await closeActiveCodexStream(false)
     await connection.close()
     clearPromptAckTimer()
@@ -651,6 +719,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   async openSession(session) {
+    // The history page below is authoritative for this session; make sure no
+    // already-received frame is still queued to be folded in on top of it.
+    flushMuxFramesNow()
     set({ busyAction: `session:${session.sessionId}`, error: undefined })
     const load = async () => {
       if (session.backend === 'codex') {
@@ -1307,6 +1378,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   async stopSession() {
+    // Drain first: a frame that arrived before the stop would otherwise land
+    // after the state is settled and mark the turn running again.
+    flushMuxFramesNow()
     const session = get().selectedSession
     if (session === undefined) return
     set({ busyAction: 'stop-session' })
@@ -1519,27 +1593,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   handleMuxFrame(frame) {
-    set(state => {
-      const sessionId = frame.payload.sessionId
-      const running = sessionRunningForMuxFrame(frame)
-      const releasePrompt = state.busyAction === 'send-message'
-        && sessionId !== undefined
-        && state.selectedSession?.sessionId === sessionId
-        && (isHarnessPromptStarted(frame) || running !== undefined)
-      const updateRunning = (session: RemoteSession): RemoteSession => (
-        sessionId !== undefined && running !== undefined && session.sessionId === sessionId
-          ? { ...session, running }
-          : session
-      )
-      return {
-        messages: applyMuxFrameToMessages(state.messages, frame),
-        ...(sessionId === undefined || running === undefined ? {} : {
-          sessions: state.sessions.map(updateRunning),
-          selectedSession: state.selectedSession === undefined ? undefined : updateRunning(state.selectedSession),
-        }),
-        ...(releasePrompt ? { busyAction: undefined } : {}),
-      }
-    })
+    get().handleMuxFrames([frame])
+  },
+
+  handleMuxFrames(frames) {
+    if (frames.length === 0) return
+    set(state => frames.reduce(reduceMuxFrameOntoState, state))
     if (useAppStore.getState().busyAction !== 'send-message') clearPromptAckTimer()
   },
 

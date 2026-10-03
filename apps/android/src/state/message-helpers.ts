@@ -1,4 +1,4 @@
-import { isActiveChatItem, settleChatItem } from './event-reducer'
+import { hasVisibleMessageText, isActiveChatItem, settleChatItem } from './event-reducer'
 import type { ChatItem, HistoryEntry } from '../types'
 
 export function findApproval(messages: Record<string, ChatItem[]>, itemId: string) {
@@ -189,7 +189,7 @@ export function mergeReplyReasoning(items: ChatItem[]): ChatItem[] {
 }
 
 function hasVisibleText(value: string): boolean {
-  return value.replace(/[\s\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu, '').length > 0
+  return hasVisibleMessageText(value)
 }
 
 function joinReasoning(parts: string[]): string {
